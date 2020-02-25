@@ -1,14 +1,11 @@
-#!/usr/bin/env php
 <?php
+//#!/usr/bin/env php
 /**
- * DownloadRename bot.
+ * downloadRename bot.
  */
 
-use Amp\Http\Server\HttpServer;
-use danog\MadelineProto\API;
-use danog\MadelineProto\MTProtoTools\Files;
+use danog\MadelineProto\Logger;
 use danog\MadelineProto\RPCErrorException;
-use danog\MadelineProto\Tools;
 use League\Uri\Contracts\UriException;
 
 /*
@@ -33,26 +30,7 @@ class EventHandler extends \danog\MadelineProto\EventHandler
                   "Usage: `https://example.com file name.ext`\n\n".
                   "I can also rename Telegram files, just send me any file and I will rename it!\n\n".
                   "Max 1.5GB, parallel upload and download powered by @MadelineProto.";
-
-    /**
-     * @var int|string Username or ID of bot admin
-     */
-    const ADMIN = 'webwarp'; // Change this
-
-    /**
-     * Get peer(s) where to report errors.
-     *
-     * @return int|string|array
-     */
-    public function getReportPeers()
-    {
-        return [self::ADMIN];
-    }
-
-    /**
-     * Whether to allow uploads.
-     */
-    private $UPLOAD;
+    const ADMIN = 'webwarp';
 
     /**
      * Array of media objects.
@@ -60,35 +38,25 @@ class EventHandler extends \danog\MadelineProto\EventHandler
      * @var array
      */
     private $states = [];
-    /**
-     * Constructor.
-     *
-     * @param ?API $API API
-     */
-    public function __construct(?API $API)
-    {
-        $this->UPLOAD = \class_exists(HttpServer::class);
-        parent::__construct($API);
-    }
-    /**
-     * Handle updates from channels and supergroups.
-     *
-     * @param array $update Update
-     *
-     * @return \Generator
-     */
-    public function onUpdateNewChannelMessage(array $update)
+
+    public function onUpdateNewChannelMessage($update)
     {
         //yield $this->onUpdateNewMessage($update);
     }
-    /**
-     * Handle updates from users.
-     *
-     * @param array $update Update
-     *
-     * @return \Generator
-     */
-    public function onUpdateNewMessage(array $update): \Generator
+
+    public function report($message)
+    {
+        try {
+            $this->messages->sendMessage([
+                'peer'    => self::ADMIN,
+                'message' => $message
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger("While reporting: $e", Logger::FATAL_ERROR);
+        }
+    }
+
+    public function onUpdateNewMessage($update)
     {
         if ($update['message']['out'] ?? false) {
             return;
@@ -102,34 +70,17 @@ class EventHandler extends \danog\MadelineProto\EventHandler
             $peerId = $peer['bot_api_id'];
             $messageId = $update['message']['id'];
 
-            if ($this->UPLOAD && $update['message']['message'] === '/getUrl') {
-                yield $this->messages->sendMessage([
-                    'peer'            => $peerId,
-                    'message'         => 'Give me a file: ',
-                    'reply_to_msg_id' => $messageId
-                ]);
-                $this->states[$peerId] = $this->UPLOAD;
-                return;
-            }
             if ($update['message']['message'] === '/start') {
                 return $this->messages->sendMessage([
-                    'peer' => $peerId,
-                    'message' => self::START,
-                    'parse_mode' => 'Markdown',
+                    'peer'            => $peerId,
+                    'message'         => self::START,
+                    'parse_mode'      => 'Markdown',
                     'reply_to_msg_id' => $messageId
                 ]);
             }
             if (isset($update['message']['media']['_']) &&
                       $update['message']['media']['_'] !== 'messageMediaWebPage')
             {
-                if ($this->UPLOAD && ($this->states[$peerId] ?? false) === $this->UPLOAD) {
-                    unset($this->states[$peerId]);
-                    $update = Files::extractBotAPIFile(yield $this->MTProtoToBotAPI($update));
-                    $file = [$update['file_size'], $update['mime_type']];
-                    \var_dump($update['file_id'].'.'.Tools::base64urlEncode(\json_encode($file))."/".
-                              $update['file_name']);
-                    return;
-                }
                 yield $this->messages->sendMessage([
                     'peer'            => $peerId,
                     'message'         => 'Give me a new name for this file: ',
@@ -141,7 +92,7 @@ class EventHandler extends \danog\MadelineProto\EventHandler
             }
             if (isset($this->states[$peerId])) {
                 $name = $update['message']['message'];
-                $url = $this->states[$peerId];
+                $url  = $this->states[$peerId];
                 unset($this->states[$peerId]);
             } else {
                 $url = \explode(' ', $update['message']['message'], 2);
@@ -185,10 +136,11 @@ class EventHandler extends \danog\MadelineProto\EventHandler
                     try {
                         yield $this->messages->editMessage(
                             [
-                                'peer' => $peerId,
-                                'id' => $id,
-                                'message' => "Upload progress: $progress%\nSpeed: $speed mbps\n".
-                                            "Time elapsed since start: $time"
+                                'peer'    => $peerId,
+                                'id'      => $id,
+                                'message' => "Upload progress: $progress%\n".
+                                             "Speed: $speed mbps\n".
+                                             "Time elapsed since start: $time"
                             ],
                             [
                                 'FloodWaitLimit' => 0
@@ -209,19 +161,25 @@ class EventHandler extends \danog\MadelineProto\EventHandler
                             ['_' => 'documentAttributeFilename', 'file_name' => $name]
                         ]
                     ],
-                    'message' => 'Powered by @MadelineProto!',
+                    'message'    => 'Powered by @MadelineProto!',
                     'parse_mode' => 'Markdown'
                 ]
             );
 
             if (\in_array($peer['type'], ['channel', 'supergroup'])) {
-                yield $this->channels->deleteMessages(['channel' => $peerId, 'id' => [$id]]);
+                yield $this->channels->deleteMessages([
+                    'channel' => $peerId,
+                    'id'      => [$id]
+                ]);
             } else {
-                yield $this->messages->deleteMessages(['revoke' => true, 'id' => [$id]]);
+                yield $this->messages->deleteMessages([
+                    'revoke' => true,
+                    'id'     => [$id]
+                ]);
             }
         } catch (\Throwable $e) {
             if (\strpos($e->getMessage(), 'Could not connect to URI') === false &&
-                !($e instanceof UriException) && 
+                !($e instanceof UriException) &&
                 \strpos($e->getMessage(), 'URI') === false)
             {
                 $this->report((string) $e);
@@ -234,7 +192,8 @@ class EventHandler extends \danog\MadelineProto\EventHandler
                 yield $this->messages->editMessage([
                     'peer'    => $peerId,
                     'id'      => $id,
-                    'message' => 'Error: '.$e->getMessage()]);
+                    'message' => 'Error: '.$e->getMessage()
+                ]);
             } catch (\Throwable $e) {
                 $this->logger((string) $e, \danog\MadelineProto\Logger::FATAL_ERROR);
             }
@@ -257,12 +216,25 @@ $settings = [
     ],
     'upload' => [
         // IMPORTANT: for security reasons, upload by URL will still be allowed
-        'allow_automatic_upload' => false
+        'allow_automatic_upload' => false,
     ],
 ];
 
 $MadelineProto = new \danog\MadelineProto\API(($argv[1] ?? 'bot').'.madeline', $settings);
-
-// Reduce boilerplate with new wrapper method.
-// Also initializes error reporting, catching and reporting all errors surfacing from the event loop.
-$MadelineProto->startAndLoop(MyEventHandler::class);
+//$authorization = $MadelineProto->botLogin($GimmeJbot_token); 858674524:AAG6KHHRnVL13GCU2pbK2qEpkzTvEnF9PFI
+$MadelineProto->async(true);
+while (true) {
+    try {
+        $MadelineProto->loop(function () use ($MadelineProto) {
+            yield $MadelineProto->start();
+            yield $MadelineProto->setEventHandler('\EventHandler');
+        });
+        $MadelineProto->loop();
+    } catch (\Throwable $e) {
+        try {
+            $MadelineProto->logger("Surfaced: $e");
+            $MadelineProto->getEventHandler(['async' => false])->report("Surfaced: $e");
+        } catch (\Throwable $e) {
+        }
+    }
+}
